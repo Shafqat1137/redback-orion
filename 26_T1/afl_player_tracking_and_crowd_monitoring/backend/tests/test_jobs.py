@@ -178,3 +178,25 @@ def test_delete_job_success(client, mock_db):
     # Ensure DB methods were called
     mock_db.delete.assert_called_once_with(fake_job)
     mock_db.commit.assert_called()
+
+# When attempting to delete a job that does not exist
+def test_delete_job_not_found(client, mock_db):
+    app.dependency_overrides[get_current_user] = override_get_current_user
+
+    mock_db.query.return_value.filter.return_value.first.return_value = None
+
+    response = client.delete("/jobs/missing-job")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Job not found"
+
+# When attempting to retry a job that does not exist
+def test_retry_job_not_found(client, mock_db):
+    app.dependency_overrides[get_current_user] = override_get_current_user
+
+    mock_db.query.return_value.filter.return_value.first.return_value = None
+
+    response = client.post("/jobs/missing-job/retry")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Job not found"

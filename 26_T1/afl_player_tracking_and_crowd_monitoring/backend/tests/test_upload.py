@@ -26,3 +26,9 @@ def test_missing_file(client):
     response = client.post("/upload", files={})
     assert response.status_code == 422
     assert "file" in str(response.json())
+
+def test_upload_invalid_mime_type(client):
+    app.dependency_overrides[get_current_user] = override_get_current_user
+    response = client.post("/upload", files={"file": ("test.mp4", b"fake video content", "text/plain")})
+    assert response.status_code == 400
+    assert "Invalid video format" in response.json()["detail"]
