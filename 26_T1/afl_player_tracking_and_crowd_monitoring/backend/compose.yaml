@@ -1,49 +1,62 @@
-# Comments are provided throughout this file to help you get started.
-# If you need more help, visit the Docker Compose reference guide at
-# https://docs.docker.com/go/compose-spec-reference/
-
-# Here the instructions define your application as a service called "server".
-# This service is built from the Dockerfile in the current directory.
-# You can add other services your application may depend on here, such as a
-# database or a cache. For examples, see the Awesome Compose repository:
-# https://github.com/docker/awesome-compose
 services:
-  server:
+
+  gateway:
     build:
       context: .
     ports:
-      - 8000:8000
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://orion_user:orion_password@db:5432/orion_db
+      PLAYER_SERVICE_URL: http://player-service:8001
+      CROWD_SERVICE_URL: http://crowd-service:8002
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
+      JWT_ALGORITHM: HS256
+      JWT_EXPIRE_MINUTES: 60
+      USE_MOCK_PLAYER: ${USE_MOCK_PLAYER:-true}
+      USE_MOCK_CROWD: ${USE_MOCK_CROWD:-false}
+      UPLOAD_DIR: /app/uploads
+      LOG_LEVEL: INFO
+      DEBUG: "false"
+    volumes:
+      - uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: on-failure
 
-# The commented out section below is an example of how to define a PostgreSQL
-# database that your application can use. `depends_on` tells Docker Compose to
-# start the database before your application. The `db-data` volume persists the
-# database data between container restarts. The `db-password` secret is used
-# to set the database password. You must create `db/password.txt` and add
-# a password of your choosing to it before running `docker compose up`.
-#     depends_on:
-#       db:
-#         condition: service_healthy
-#   db:
-#     image: postgres
-#     restart: always
-#     user: postgres
-#     secrets:
-#       - db-password
-#     volumes:
-#       - db-data:/var/lib/postgresql/data
-#     environment:
-#       - POSTGRES_DB=example
-#       - POSTGRES_PASSWORD_FILE=/run/secrets/db-password
-#     expose:
-#       - 5432
-#     healthcheck:
-#       test: [ "CMD", "pg_isready" ]
-#       interval: 10s
-#       timeout: 5s
-#       retries: 5
-# volumes:
-#   db-data:
-# secrets:
-#   db-password:
-#     file: db/password.txt
+  db:
+    image: postgres:15
+    restart: always
+    environment:
+      POSTGRES_USER: orion_user
+      POSTGRES_PASSWORD: orion_password
+      POSTGRES_DB: orion_db
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    expose:
+      - 5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orion_user -d orion_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
+  # player-service:              -- uncomment when player team provides their Dockerfile
+  #   build:
+  #     context: ../player_tracking_logic
+  #   ports:
+  #     - "8001:8001"
+  #   volumes:
+  #     - uploads:/app/uploads
+
+  # crowd-service:               -- uncomment when crowd team provides their Dockerfile
+  #   build:
+  #     context: ../Crowd_Monitoring/2026_T1
+  #   ports:
+  #     - "8002:8002"
+  #   volumes:
+  #     - uploads:/app/uploads
+
+volumes:
+  db_data:
+  uploads:
