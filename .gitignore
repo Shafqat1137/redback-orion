@@ -48,3 +48,5 @@ bin/
 obj/
 bin/
 .DS_Store
+/Player_Tracking/Pose_Matching_project/Pose_Estimation/pose-estimation-fitness
+*.jpg
