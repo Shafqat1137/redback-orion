@@ -7,9 +7,9 @@ from ultralytics import YOLO
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
-VIDEO_PATH = "SF vs C.mov"
-MODEL_PATH = "yolov8n.pt"
-CONF_THRESHOLD = 0.30
+VIDEO_PATH = "afl_video.mp4"
+MODEL_PATH = "yolo8n.pt"
+CONF_THRESHOLD = 0.10
 TRACKER_CONFIG = "botsort.yaml"
 
 RESIZE_WIDTH = 640
@@ -172,7 +172,7 @@ model = YOLO(MODEL_PATH)
 cap = cv2.VideoCapture(VIDEO_PATH)
 
 # Start video at 5 minutes
-cap.set(cv2.CAP_PROP_POS_MSEC, 300 * 1000)
+#cap.set(cv2.CAP_PROP_POS_MSEC, 300 * 1000)
 
 if not cap.isOpened():
     print(f"Could not open video: {VIDEO_PATH}")

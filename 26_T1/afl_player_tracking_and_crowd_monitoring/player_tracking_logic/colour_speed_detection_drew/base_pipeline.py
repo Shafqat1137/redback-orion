@@ -99,7 +99,7 @@ def create_tracking_video(images_folder, output_video_path, fps=30):
                     detections.append((bbox, confidence, 'person'))
             
             # Update tracker
-            tracks = tracker.update_tracks(detections, frame=frame)
+            tracks = tracker.updsdsdaate_tracks(detections, frame=frame)
             
             # Draw tracking results
             for track in tracks:
