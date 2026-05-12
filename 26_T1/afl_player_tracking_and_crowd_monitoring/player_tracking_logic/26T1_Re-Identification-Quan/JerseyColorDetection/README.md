@@ -409,10 +409,7 @@ Example:
 
 ## Annotated Output Video Frame
 
-
-```markdown
 ![Output Frame](output.png)
-```
 
 ---
 

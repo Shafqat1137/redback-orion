@@ -186,7 +186,7 @@ because this formation visualizer depends on this field
 "cluster_team"
 ```
 
-which is the generated jsopn output during jersey colour clustering.
+which is the generated json output during jersey colour clustering.
 
 ---
 
@@ -463,9 +463,7 @@ The rendered video includes:
 
 ## Tactical Formation Visualization Output
 
-```markdown
 ![Formation Output](output.png)
-```
 
 ---
 
