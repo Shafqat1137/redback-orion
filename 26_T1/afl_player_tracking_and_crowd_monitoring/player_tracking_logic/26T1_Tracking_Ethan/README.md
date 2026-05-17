@@ -4,6 +4,21 @@ This project provides a modular YOLO-based player tracking pipeline for AFL matc
 
 The pipeline is designed for cases where simple centre-distance tracking is not stable enough, especially in AFL broadcast footage where players frequently overlap, move quickly, appear in visually similar groups, and may be detected with fluctuating class predictions.
 
+
+## Latest update
+
+This version has been updated for the latest `best(SSvsWB).pt` model and now integrates a JerseyColorDetection-style post-processing stage. In addition to player detection and ID tracking, the pipeline can extract torso-region jersey colour features, cluster tracked players into colour-based groups, and export movement metrics such as approximate distance and speed.
+
+For the current `best(SSvsWB).pt` model, the class mapping is:
+
+```text
+0 = REF
+1 = SS
+2 = WB
+```
+
+For player-only tracking, set `player_classes` to `[1, 2]`. If referee tracking is also required, use `[0, 1, 2]`.
+
 ## Key features
 
 - YOLO-based player detection using a custom model.
@@ -17,6 +32,11 @@ The pipeline is designed for cases where simple centre-distance tracking is not 
 - Ambiguous match handling to reduce unnecessary ID switches.
 - Annotated output video with ID labels, confidence values, bounding boxes, and motion trails.
 - JSON output for backend integration and future tracking-data processing.
+- Latest custom model support for `best(SSvsWB).pt`.
+- JerseyColorDetection-style torso colour feature extraction.
+- Player-level KMeans clustering using jersey colour features.
+- Cluster labels added to the annotated video and JSON output.
+- CSV movement metrics output including approximate distance and speed.
 
 ## Project structure
 
@@ -36,6 +56,8 @@ player_tracking_project/
     ├── config.py
     ├── detector.py
     ├── geometry.py
+    ├── jersey_cluster.py
+    ├── metrics.py
     ├── tracker.py
     ├── video_processor.py
     └── visualizer.py
@@ -52,6 +74,8 @@ player_tracking_project/
 | `tracker.py` | Maintains active tracks, performs robust ID matching, handles missing tracks, and exports track records. |
 | `geometry.py` | Provides distance, IoU, cosine similarity, direction cost, and bbox helper functions. |
 | `appearance.py` | Extracts lightweight HSV colour histogram features from each detected player crop. |
+| `jersey_cluster.py` | Assigns player-level jersey colour clusters using StandardScaler and KMeans after tracking. |
+| `metrics.py` | Exports per-track movement metrics such as approximate distance and speed to CSV. |
 | `visualizer.py` | Draws bounding boxes, ID labels, confidence values, centre points, and trajectory trails. |
 
 ## Installation
@@ -76,9 +100,12 @@ ultralytics
 opencv-python
 numpy
 scipy
+scikit-learn
 ```
 
 `scipy` is used for Hungarian assignment through `linear_sum_assignment`. If it is unavailable, the tracker falls back to a greedy assignment strategy.
+
+`scikit-learn` is required for the JerseyColorDetection-style clustering stage, where `StandardScaler` and `KMeans` are used to group tracked players based on jersey colour features.
 
 ## Prepare input files
 
@@ -90,6 +117,19 @@ models/model.pt
 ```
 
 The default paths can also be changed through command-line arguments.
+
+
+For the latest SS vs WB test, place the updated model at:
+
+```text
+models/best(SSvsWB).pt
+```
+
+The current tested video can still be placed at:
+
+```text
+data/videos/video.mp4
+```
 
 ## Run the tracker
 
@@ -112,6 +152,24 @@ python main.py \
   --imgsz 640
 ```
 
+
+Latest SS vs WB run with jersey clustering:
+
+```bash
+python main.py \
+  --video data/videos/video.mp4 \
+  --model "models/best(SSvsWB).pt" \
+  --output-video outputs/video_track_clustered.mp4 \
+  --output-json outputs/video_track_clustered.json \
+  --output-csv outputs/player_metrics.csv \
+  --seconds 40 \
+  --conf 0.10 \
+  --imgsz 960 \
+  --clusters 2
+```
+
+Use `--clusters 2` when only SS and WB are tracked. Use `--clusters 3` if REF is also included in `player_classes`.
+
 ### Command-line arguments
 
 | Argument | Default | Description |
@@ -120,9 +178,13 @@ python main.py \
 | `--model` | `models/model.pt` | YOLO model path. |
 | `--output-video` | `video_track.mp4` | Output annotated video path. |
 | `--output-json` | `video_track.json` | Output JSON path. |
+| `--output-csv` | `outputs/player_metrics.csv` | Output CSV path for movement metrics. |
 | `--seconds` | `40` | Number of seconds to process from the beginning of the video. |
 | `--conf` | `0.25` | YOLO confidence threshold. |
 | `--imgsz` | `640` | YOLO inference image size. |
+| `--clusters` | `3` | Number of jersey colour clusters used in KMeans. Use `2` for two player teams only. |
+| `--min-samples-per-track` | `5` | Minimum number of jersey colour samples required before a track can be clustered. |
+| `--pixel-to-meter` | `0.05` | Approximate conversion factor used when exporting distance and speed metrics. |
 
 ## Tracking stability design
 
@@ -203,6 +265,9 @@ The tracker compares appearance features using cosine similarity. This helps red
 
 The appearance model is intentionally lightweight and dependency-friendly. It should be treated as a stabilisation cue, not as a full person re-identification model.
 
+
+Latest update: the appearance feature is now extracted from the torso / jersey region rather than the full bounding box. This reduces noise from grass, shorts, socks, field markings, and background pixels. The same torso region is also used to create a separate JerseyColorDetection-style feature vector for team clustering.
+
 ### 7. Duplicate detection filtering
 
 YOLO may sometimes generate multiple boxes for the same player. Before matching, detections are sorted by confidence and likely duplicates are removed.
@@ -256,6 +321,31 @@ max_missing = 15
 
 This helps maintain ID continuity when a player is briefly hidden, missed by the detector, or affected by motion blur.
 
+
+### 11. JerseyColorDetection-style team clustering
+
+After tracking is complete, the pipeline collects jersey colour samples for each tracking ID and performs player-level clustering. This is different from frame-by-frame team classification because it uses all available samples from the same ID to build a more stable colour profile.
+
+The clustering process uses:
+
+```text
+torso ROI extraction
+HSV colour statistics
+red / yellow / blue / white / dark pixel ratios
+median feature aggregation per track
+StandardScaler feature normalisation
+KMeans unsupervised clustering
+```
+
+The exported cluster labels are stored as:
+
+```text
+cluster_id
+cluster_team
+```
+
+These labels are useful for separating SS and WB players in the output video and backend JSON. The cluster names are automatic labels such as `Team_0` and `Team_1`; they should be mapped to real team names after visually checking the output video.
+
 ## Algorithm overview
 
 For each frame:
@@ -282,6 +372,16 @@ For each frame:
 14. Draw boxes, IDs, confidence values, and trails on the output video frame.
 15. Save all tracking history to the final JSON file.
 
+
+Latest update after the frame loop:
+
+16. Collect jersey colour samples from each tracking ID.
+17. Compute a median representative jersey feature for each player track.
+18. Use StandardScaler and KMeans to assign colour-based `cluster_team` labels.
+19. Render the final annotated video with ID labels, confidence values, trails, and cluster labels.
+20. Export a CSV file containing per-track movement metrics such as approximate distance and speed.
+21. Save the final JSON file with tracking history, cluster labels, and jersey feature summaries.
+
 ## Configuration parameters
 
 Most tracking behaviour can be tuned in:
@@ -298,6 +398,8 @@ player_tracking/config.py
 | `conf_threshold` | `0.25` | Minimum YOLO detection confidence. |
 | `imgsz` | `640` | YOLO inference image size. |
 | `process_seconds` | `40` | Number of seconds processed from the video. |
+
+For `best(SSvsWB).pt`, use `[1, 2]` for SS and WB player-only tracking, because the model classes are `0 = REF`, `1 = SS`, and `2 = WB`.
 
 ### Tracking parameters
 
@@ -327,11 +429,28 @@ player_tracking/config.py
 |---|---:|---|
 | `appearance_momentum` | `0.8` | Smooths the appearance feature over time. Higher values preserve older appearance more strongly. |
 
+
+### Jersey clustering parameters
+
+| Parameter | Default | Description |
+|---|---:|---|
+| `jersey_clusters` | `3` | Number of KMeans clusters for jersey colour grouping. Use `2` for SS/WB only, or `3` when REF is included. |
+| `min_samples_per_track` | `5` | Minimum number of torso colour samples needed before a track can be clustered. |
+| `kmeans_random_state` | `42` | Random seed for reproducible KMeans clustering. |
+
+### Metrics parameters
+
+| Parameter | Default | Description |
+|---|---:|---|
+| `pixel_to_meter` | `0.05` | Approximate pixel-to-metre conversion used for distance and speed output. |
+| `max_speed_kmh` | `40.0` | Filters unrealistic peak speed values when calculating movement metrics. |
+
 ### Output parameters
 
 | Parameter | Default | Description |
 |---|---:|---|
 | `draw_confidence` | `True` | Draws the latest confidence score beside each ID. |
+| `draw_cluster` | `True` | Draws the assigned jersey colour cluster label beside each ID. |
 | `print_every_n_frames` | `50` | Prints progress every N processed frames. |
 
 ## Outputs
@@ -341,6 +460,15 @@ The pipeline writes two default output files:
 ```text
 video_track.mp4
 video_track.json
+```
+
+
+The latest JerseyColorDetection-style version can also write:
+
+```text
+outputs/video_track_clustered.mp4
+outputs/video_track_clustered.json
+outputs/player_metrics.csv
 ```
 
 ### Annotated video
@@ -353,6 +481,7 @@ The output video contains:
 - bounding box
 - centre point
 - recent trajectory trail
+- jersey colour cluster label such as `Team_0` or `Team_1`
 
 ### JSON output
 
@@ -365,12 +494,15 @@ Top-level fields include:
 | `video_path` | Input video path. |
 | `model_path` | YOLO model path. |
 | `output_video_path` | Output tracking video path. |
+| `output_json_path` | Output JSON path. |
+| `output_csv_path` | Output CSV metrics path. |
 | `fps` | Video frame rate. |
 | `total_frames` | Total number of frames in the input video. |
 | `processed_frames` | Number of frames processed by the pipeline. |
 | `process_seconds` | Configured processing duration. |
 | `resolution` | Video width and height. |
 | `player_classes` | Classes tracked as players. |
+| `jersey_clustering` | Summary of the KMeans jersey clustering stage. |
 | `tracks` | Dictionary of all tracking IDs and their histories. |
 
 Each track contains:
@@ -381,6 +513,10 @@ Each track contains:
 | `initial_class_id` | Class assigned when the ID was first created. |
 | `initial_class_name` | Class name assigned when the ID was first created. |
 | `num_observed_frames` | Total number of frames where this ID was detected and updated. |
+| `cluster_id` | Numeric jersey colour cluster assigned after KMeans clustering. |
+| `cluster_team` | Human-readable cluster label such as `Team_0`, `Team_1`, or `Unknown`. |
+| `jersey_sample_count` | Number of torso colour samples collected for this track. |
+| `representative_jersey_feature` | Median jersey colour feature vector for this track. |
 | `frames` | Per-frame tracking history for this ID. |
 
 Each frame record contains:
@@ -396,6 +532,8 @@ Each frame record contains:
 | `detected_class_name` | Raw YOLO class name in this frame. |
 | `fixed_initial_class_id` | Stable initial class ID for this track. |
 | `fixed_initial_class_name` | Stable initial class name for this track. |
+| `cluster_id` | Jersey colour cluster assigned to this track. |
+| `cluster_team` | Cluster label assigned to this track. |
 
 Example structure:
 
@@ -437,6 +575,29 @@ Example structure:
 }
 ```
 
+
+### CSV metrics output
+
+The `player_metrics.csv` file provides one row per tracking ID. It includes:
+
+| Field | Description |
+|---|---|
+| `track_id` | Persistent tracking ID. |
+| `cluster_id` | Jersey colour cluster ID. |
+| `cluster_team` | Jersey colour cluster label. |
+| `initial_class_id` | Initial YOLO class ID. |
+| `initial_class_name` | Initial YOLO class name. |
+| `num_observed_frames` | Number of frames where the track was observed. |
+| `jersey_sample_count` | Number of jersey colour samples used for clustering. |
+| `first_frame` / `last_frame` | First and last frame indices for the track. |
+| `first_time_sec` / `last_time_sec` | First and last timestamps for the track. |
+| `total_distance_px` | Approximate total movement distance in pixels. |
+| `total_distance_m` | Approximate total movement distance after applying `pixel_to_meter`. |
+| `avg_speed_kmh` | Approximate average speed. |
+| `max_speed_kmh` | Approximate maximum speed after filtering unrealistic values. |
+
+Distance and speed are approximate because they are calculated from image-space coordinates. For more accurate tactical analysis, player positions should be mapped to a stable field coordinate system using homography or camera registration.
+
 ## Backend integration notes
 
 The JSON structure can support backend-side analysis such as:
@@ -450,6 +611,8 @@ The JSON structure can support backend-side analysis such as:
 - checking raw class prediction changes over time
 - measuring how often an ID appears
 - generating trajectory data for visualisation or analytics
+- grouping players by jersey colour cluster for team-based analysis
+- using `player_metrics.csv` for approximate movement distance and speed analysis
 
 The current implementation stores the bbox centre as `center`. If the backend requires the bottom-centre point for player-ground-position estimation, it can be derived from each `bbox` as:
 
@@ -492,6 +655,14 @@ Centre-position history can be derived from:
 center_history = [frame["center"] for frame in track["frames"]]
 ```
 
+
+Cluster labels can be accessed from:
+
+```python
+cluster_team = track["cluster_team"]
+cluster_id = track["cluster_id"]
+```
+
 ## Practical tuning advice
 
 For dense AFL scenes, the following parameters are usually the most important:
@@ -505,6 +676,10 @@ For dense AFL scenes, the following parameters are usually the most important:
 - Increase `ambiguity_margin` if ID switches occur during overlap.
 - Increase `conf_threshold` if there are too many false detections.
 - Decrease `conf_threshold` if players are frequently missed.
+- Use `player_classes = [1, 2]` for the latest `best(SSvsWB).pt` model when only SS and WB players should be tracked.
+- Use `--clusters 2` for two-team clustering, or `--clusters 3` if referees are included.
+- Increase `min_samples_per_track` if unstable or short-lived tracks are being clustered too easily.
+- Tune `pixel_to_meter` before treating CSV distance and speed values as real-world measurements.
 
 ## Limitations
 
@@ -516,6 +691,8 @@ This tracker is designed as a practical lightweight pipeline, not a full deep re
 - motion blur reduces crop quality
 - heavy occlusion hides most of the player body
 - broadcast camera movement changes the visual context quickly
+- KMeans cluster labels are automatic and need to be mapped to real team names manually
+- distance and speed values are approximate because they are currently calculated from image-space coordinates
 
 For stronger long-term identity preservation, future work could add camera-motion compensation, optical flow, Kalman filtering, or a trained ReID feature extractor.
 
@@ -526,6 +703,14 @@ For sharing results with the backend team, provide:
 ```text
 video_track.mp4
 video_track.json
+```
+
+For the latest JerseyColorDetection-style version, also provide:
+
+```text
+outputs/video_track_clustered.mp4
+outputs/video_track_clustered.json
+outputs/player_metrics.csv
 ```
 
 The video is useful for visual inspection, while the JSON file is the main structured output for backend integration.
