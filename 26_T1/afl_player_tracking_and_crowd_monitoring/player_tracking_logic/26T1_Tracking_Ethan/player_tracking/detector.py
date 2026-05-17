@@ -59,8 +59,10 @@ def parse_yolo_detections(
                 "bbox": xyxy,
                 "center": center,
                 "conf": conf,
-                "class_id": class_id,
-                "class_name": get_class_name_from_model(model, class_id),
+                # "class_id": class_id,
+                "class_id": 0,
+                # "class_name": get_class_name_from_model(model, class_id),
+                "class_name": "PLAYER",
                 # Online appearance feature for reducing ID switches.
                 "appearance": extract_appearance_feature(frame, xyxy),
                 # Offline jersey colour feature for team clustering.

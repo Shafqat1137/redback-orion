@@ -20,7 +20,7 @@ class TrackingConfig:
     # =========================
     # Detection parameters
     # =========================
-    player_classes: List[int] = field(default_factory=lambda: [0, 1, 2])
+    player_classes: List[int] = field(default_factory=lambda: [0])
     conf_threshold: float = 0.25
     imgsz: int = 640
     process_seconds: int = 40
@@ -79,5 +79,5 @@ class TrackingConfig:
     # Display/output
     # =========================
     draw_confidence: bool = True
-    draw_cluster: bool = True
+    draw_cluster: bool = False
     print_every_n_frames: int = 50
