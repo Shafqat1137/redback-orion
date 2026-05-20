@@ -1,185 +1,410 @@
-import pandas as pd
-import numpy as np
+import argparse
 import json
+from pathlib import Path
+import cv2
+import numpy as np
+import pandas as pd
+import logging
 
-# =========================
-# CONFIG (FINAL TUNED)
-# =========================
-INPUT_FILE = "afl_tracking_results(in).csv"
-OUTPUT_CSV = "tackle_frames.csv"
-OUTPUT_JSON = "tackle_events.json"
+from config import CONFIG
 
-DIST_THRESHOLD = 100
-MIN_INTERACTIONS = 8
-MIN_PLAYERS = 4
-DENSITY_THRESHOLD = 1.2
-MIN_EVENT_LENGTH = 5
-MAX_FRAME_GAP = 10   # NEW: allows merging small gaps
+# ============================================================
+# LOGGING
+# ============================================================
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
-# =========================
-# LOAD DATA
-# =========================
-df = pd.read_csv(INPUT_FILE)
+# ============================================================
+# LOAD TRACKING DATA
+# ============================================================
 
+def load_tracking_data(csv_path):
 
-# =========================
-# FUNCTION: cluster score
-# =========================
-def cluster_score(group):
-    players = group[["cx", "cy"]].values
-    score = 0
+    df = pd.read_csv(csv_path)
 
-    for i in range(len(players)):
-        for j in range(i + 1, len(players)):
-            dist = np.linalg.norm(players[i] - players[j])
-            if dist < DIST_THRESHOLD:
-                score += 1
+    required_columns = [
+        "frame_id",
+        "player_id",
+        "timestamps_s",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+        "cx",
+        "cy",
+        "w",
+        "h",
+        "confidence"
+    ]
 
-    return score
+    missing = [c for c in required_columns if c not in df.columns]
 
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
 
-# =========================
-# FUNCTION: group frames with GAP tolerance
-# =========================
-def group_frames(frames, max_gap=3):
-    if not frames:
-        return []
+    if df.empty:
+        raise ValueError("Tracking CSV is empty.")
 
-    frames = sorted(frames)
-    grouped = []
-    current = [frames[0]]
-
-    for f in frames[1:]:
-        if f <= current[-1] + max_gap:
-            current.append(f)
-        else:
-            grouped.append(current)
-            current = [f]
-
-    grouped.append(current)
-    return grouped
+    return df
 
 
-# =========================
-# STEP 1: FRAME DETECTION
-# =========================
-results = []
+# ============================================================
+# DETECT CANDIDATE FRAMES
+# ============================================================
 
-for frame_id, group in df.groupby("frame_id"):
+def detect_candidate_frames(df):
 
-    num_players = group["player_id"].nunique()
+    detected_frames = []
+    grouped = df.groupby("frame_id")
 
-    if num_players < MIN_PLAYERS:
-        continue
+    for frame_id, group in grouped:
 
-    score = cluster_score(group)
-    density_ratio = score / (num_players + 1)
+        players = len(group)
 
-    if score >= MIN_INTERACTIONS and density_ratio > DENSITY_THRESHOLD:
+        if players < CONFIG["MIN_PLAYERS"]:
+            continue
 
         x_min = group["x1"].min()
         y_min = group["y1"].min()
         x_max = group["x2"].max()
         y_max = group["y2"].max()
 
-        timestamp = group["timestamps_s"].mean()
+        width = max(x_max - x_min, 1)
+        height = max(y_max - y_min, 1)
 
-        results.append({
-            "frame_id": int(frame_id),
-            "timestamp_s": float(timestamp),
-            "cluster_score": int(score),
-            "density_ratio": float(density_ratio),
-            "players": int(num_players),
-            "x_min": float(x_min),
-            "y_min": float(y_min),
-            "x_max": float(x_max),
-            "y_max": float(y_max)
+        area = width * height
+
+        density_ratio = players / max(area / 100000, 1)
+
+        cluster_score = players + int(density_ratio * 5)
+
+        if (
+            cluster_score >= CONFIG["MIN_INTERACTIONS"]
+            and density_ratio >= CONFIG["DENSITY_THRESHOLD"]
+        ):
+
+            detected_frames.append({
+                "frame_id": int(frame_id),
+                "timestamps_s": float(group["timestamps_s"].iloc[0]),
+                "cluster_score": int(cluster_score),
+                "density_ratio": float(density_ratio),
+                "players": int(players),
+                "x_min": int(x_min),
+                "y_min": int(y_min),
+                "x_max": int(x_max),
+                "y_max": int(y_max)
+            })
+
+    return pd.DataFrame(detected_frames)
+
+
+# ============================================================
+# GROUP EVENTS
+# ============================================================
+
+def group_events(filtered_df, fps):
+
+    events = []
+
+    if filtered_df.empty:
+        return events
+
+    frames = filtered_df["frame_id"].tolist()
+
+    current_start = frames[0]
+    previous_frame = frames[0]
+
+    for frame in frames[1:]:
+
+        if frame - previous_frame <= CONFIG["MAX_FRAME_GAP"]:
+            previous_frame = frame
+
+        else:
+
+            duration = previous_frame - current_start + 1
+
+            if duration >= CONFIG["MIN_EVENT_LENGTH"]:
+                events.append({
+                    "start_frame": current_start,
+                    "end_frame": previous_frame
+                })
+
+            current_start = frame
+            previous_frame = frame
+
+    duration = previous_frame - current_start + 1
+
+    if duration >= CONFIG["MIN_EVENT_LENGTH"]:
+        events.append({
+            "start_frame": current_start,
+            "end_frame": previous_frame
         })
 
+    final_events = []
 
-frame_df = pd.DataFrame(results)
-frame_df.to_csv(OUTPUT_CSV, index=False)
+    for idx, event in enumerate(events, start=1):
 
-print(f"\nDetected {len(frame_df)} filtered frames")
-print(frame_df.head())
+        start_frame = event["start_frame"]
+        end_frame = event["end_frame"]
 
+        duration_frames = end_frame - start_frame + 1
 
-# =========================
-# STEP 2: GROUP INTO EVENTS (with gap tolerance)
-# =========================
-tackle_frames = frame_df["frame_id"].tolist()
-tackle_events = group_frames(tackle_frames, MAX_FRAME_GAP)
+        final_events.append({
+            "event_id": idx,
+            "start_frame": int(start_frame),
+            "end_frame": int(end_frame),
+            "start_time_s": round(start_frame / fps, 3),
+            "end_time_s": round(end_frame / fps, 3),
+            "duration_frames": int(duration_frames),
+            "duration_s": round(duration_frames / fps, 3),
+            "label": "tackle"
+        })
 
-
-# =========================
-# STEP 3: TEMPORAL FILTER
-# =========================
-filtered_events = []
-
-for event in tackle_events:
-    if len(event) >= MIN_EVENT_LENGTH:
-        filtered_events.append(event)
-
-print(f"\nEvents before filtering: {len(tackle_events)}")
-print(f"Events after filtering: {len(filtered_events)}")
+    return final_events
 
 
-# =========================
-# STEP 4: JSON OUTPUT
-# =========================
-events_output = []
+# ============================================================
+# EXTRACT PLAYERS
+# ============================================================
 
-for idx, event_frames in enumerate(filtered_events, start=1):
+def extract_players_for_event(df, start_frame, end_frame):
 
-    event_group = df[df["frame_id"].isin(event_frames)]
+    event_df = df[
+        (df["frame_id"] >= start_frame) &
+        (df["frame_id"] <= end_frame)
+    ]
 
-    x_min = event_group["x1"].min()
-    y_min = event_group["y1"].min()
-    x_max = event_group["x2"].max()
-    y_max = event_group["y2"].max()
+    players_output = []
 
-    start_frame = event_frames[0]
-    end_frame = event_frames[-1]
+    for player_id in event_df["player_id"].unique():
 
-    start_time = event_group["timestamps_s"].min()
-    end_time = event_group["timestamps_s"].max()
+        player_df = event_df[event_df["player_id"] == player_id]
 
-    avg_score = frame_df[frame_df["frame_id"].isin(event_frames)]["cluster_score"].mean()
+        avg_bbox = {
+            "x1": int(player_df["x1"].mean()),
+            "y1": int(player_df["y1"].mean()),
+            "x2": int(player_df["x2"].mean()),
+            "y2": int(player_df["y2"].mean())
+        }
 
-    players_involved = event_group["player_id"].nunique()
+        players_output.append({
+            "player_id": int(player_id),
+            "avg_bbox": avg_bbox,
+            "frames_present": player_df["frame_id"].astype(int).tolist()
+        })
 
-    event_data = {
-        "event_id": idx,
-        "event_type": "multi_player_tackle",
-        "start_frame": int(start_frame),
-        "end_frame": int(end_frame),
-        "start_time_s": float(start_time),
-        "end_time_s": float(end_time),
-        "duration_frames": int(end_frame - start_frame + 1),
-        "players_involved": int(players_involved),
-        "cluster_score": float(avg_score),
-        "bounding_box": {
-            "x_min": float(x_min),
-            "y_min": float(y_min),
-            "x_max": float(x_max),
-            "y_max": float(y_max)
-        },
-        "confidence": round(min(avg_score / 15, 1.0), 2)
+    return players_output
+
+
+# ============================================================
+# BUILD JSON
+# ============================================================
+
+def build_json(events, df, filtered_df, video_name, fps):
+
+    final_events = []
+
+    for event in events:
+
+        start_frame = event["start_frame"]
+        end_frame = event["end_frame"]
+
+        frame_rows = filtered_df[
+            (filtered_df["frame_id"] >= start_frame) &
+            (filtered_df["frame_id"] <= end_frame)
+        ]
+
+        if frame_rows.empty:
+            continue
+
+        tackle_bbox = {
+            "x_min": int(frame_rows["x_min"].min()),
+            "y_min": int(frame_rows["y_min"].min()),
+            "x_max": int(frame_rows["x_max"].max()),
+            "y_max": int(frame_rows["y_max"].max())
+        }
+
+        players_involved = extract_players_for_event(
+            df, start_frame, end_frame
+        )
+
+        event_output = {
+            **event,
+            "cluster_score": int(frame_rows["cluster_score"].max()),
+            "density_ratio": round(float(frame_rows["density_ratio"].max()), 3),
+            "players_detected": len(players_involved),
+            "tackle_bbox": tackle_bbox,
+            "players_involved": players_involved
+        }
+
+        final_events.append(event_output)
+
+    return {
+        "video_name": video_name,
+        "fps": fps,
+        "total_detected_events": len(final_events),
+        "events": final_events
     }
 
-    events_output.append(event_data)
+
+# ============================================================
+# SAVE OUTPUTS
+# ============================================================
+
+def save_json(data, path):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=4)
+
+    logging.info(f"JSON saved: {path}")
 
 
-final_output = {
-    "video_id": "afl_tracking_sample",
-    "events": events_output
-}
+def save_csv(data, path):
 
-with open(OUTPUT_JSON, "w") as f:
-    json.dump(final_output, f, indent=4)
+    rows = []
+
+    for e in data["events"]:
+        rows.append({
+            "event_id": e["event_id"],
+            "start_frame": e["start_frame"],
+            "end_frame": e["end_frame"],
+            "start_time_s": e["start_time_s"],
+            "end_time_s": e["end_time_s"],
+            "players_detected": e["players_detected"],
+            "cluster_score": e["cluster_score"],
+            "density_ratio": e["density_ratio"]
+        })
+
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+    logging.info(f"CSV saved: {path}")
 
 
-print("\nFinal Events:")
-for e in events_output:
-    print(f"Event {e['event_id']}: Frames {e['start_frame']} → {e['end_frame']}")
+# ============================================================
+# VIDEO GENERATION
+# ============================================================
+
+def generate_output_video(video_path, events_json, output_video):
+
+    cap = cv2.VideoCapture(str(video_path))
+
+    if not cap.isOpened():
+        raise ValueError("Cannot open video")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    writer = cv2.VideoWriter(
+        str(output_video),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (w, h)
+    )
+
+    frame_id = 0
+
+    while True:
+
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        for event in events_json["events"]:
+
+            if event["start_frame"] <= frame_id <= event["end_frame"]:
+
+                b = event["tackle_bbox"]
+
+                cv2.rectangle(
+                    frame,
+                    (b["x_min"], b["y_min"]),
+                    (b["x_max"], b["y_max"]),
+                    (0, 0, 255),
+                    3
+                )
+
+                cv2.putText(
+                    frame,
+                    f"TACKLE #{event['event_id']}",
+                    (50, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 0, 255),
+                    2
+                )
+
+                cv2.putText(
+                    frame,
+                    f"Players: {event['players_detected']}",
+                    (50, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255, 255, 255),
+                    2
+                )
+
+        writer.write(frame)
+        frame_id += 1
+
+    cap.release()
+    writer.release()
+
+    logging.info(f"Video saved: {output_video}")
+
+
+# ============================================================
+# MAIN CLI
+# ============================================================
+
+def main():
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--tracking", required=True)
+    parser.add_argument("--video", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--fps", type=float, default=29.97)
+
+    args = parser.parse_args()
+
+    out = Path(args.output)
+    out.mkdir(parents=True, exist_ok=True)
+
+    logging.info("Loading tracking data...")
+    df = load_tracking_data(args.tracking)
+
+    logging.info("Detecting frames...")
+    filtered_df = detect_candidate_frames(df)
+
+    logging.info(f"Detected frames: {len(filtered_df)}")
+
+    logging.info("Grouping events...")
+    events = group_events(filtered_df, args.fps)
+
+    logging.info(f"Events: {len(events)}")
+
+    logging.info("Building JSON...")
+    final_json = build_json(
+        events, df, filtered_df,
+        Path(args.video).name,
+        args.fps
+    )
+
+    save_json(final_json, out / "tackle_events.json")
+    save_csv(final_json, out / "tackle_events.csv")
+
+    logging.info("Generating video...")
+    generate_output_video(
+        args.video,
+        final_json,
+        out / "tackle_detection_output.mp4"
+    )
+
+    logging.info("Pipeline completed")
+
+
+if __name__ == "__main__":
+    main()
